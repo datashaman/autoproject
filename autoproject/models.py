@@ -3,6 +3,7 @@ import os
 
 from typing import Optional
 
+from devtools import pprint
 from openai import OpenAI
 from pydantic import BaseModel, PrivateAttr
 
@@ -14,7 +15,6 @@ class Assistant(BaseModel):
     role: str
     instructions: str
     tools: list[str] = []
-    id: Optional[str] = None
 
 
 class Requirement(BaseModel):
@@ -61,8 +61,15 @@ class Project(BaseModel):
                 f"Creating/updating assistant {assistant.name} with role "
                 + f"{assistant.role} for project {self.reference}."
             )
-            result = self.update_or_create_assistant(assistant)
-            assistant.id = result.id
+            self.update_or_create_assistant(assistant)
+
+        thread = client.beta.threads.create()
+
+        client.beta.threads.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=f"I would like to complete project {self.reference} with goals {self.goals}.",
+        )
 
         done_count = 0
         tasks = dict((task.title, task) for task in self.tasks)
@@ -73,8 +80,37 @@ class Project(BaseModel):
                     continue
                 if all(tasks[depend_on].done for depend_on in task.depends_on):
                     print(f"{task.assigned_to.role}: {task.instructions}")
+
+                    openai_assistant = self.get_openai_assistant(task.assigned_to)
+
+                    run = client.beta.threads.runs.create_and_poll(
+                        thread_id=thread.id,
+                        assistant_id=openai_assistant.id,
+                        instructions=f"{task.assigned_to.name}, please {task.instructions}",
+                    )
+
+                    messages = list(client.beta.threads.messages.list(
+                        thread_id=thread.id,
+                    ))
+
+                    most_recent_message = messages[0]
+
+                    if most_recent_message.role == "assistant":
+                        print(f"{task.assigned_to.name}: {most_recent_message.content[0].text.value}")
+
+                    user_input = input("> ")
+
                     task.done = True
                     done_count += 1
+
+    def wait_on_run(self, run):
+        while run.status == "queued" or run.status == "in_progress":
+            run = client.beta.threads.runs.retrieve(
+                thread_id=run.thread_id,
+                run_id=run.id,
+            )
+            time.sleep(0.5)
+        return run
 
     @classmethod
     def load(cls, filename: str) -> "Project":
@@ -92,8 +128,9 @@ class Project(BaseModel):
         """Get a list of OpenAI assistants."""
         return self._client.beta.assistants.list()
 
-    def get_assistant_by_name(self, name: str) -> Optional[dict]:
-        """Get an OpenAI assistant by name."""
+    def get_openai_assistant(self, assistant: Assistant) -> Optional[dict]:
+        """Get an OpenAI assistant given an assistant model."""
+        name = self.generate_assistant_name(assistant)
         return next(
             (
                 assistant
@@ -103,25 +140,26 @@ class Project(BaseModel):
             None,
         )
 
+    def generate_assistant_name(self, assistant: Assistant) -> str:
+        """Generate an OpenAI assistant name given an assistant model."""
+        return f"{self.reference}-{assistant.name}-{assistant.role}"
+
     def update_or_create_assistant(self, assistant: Assistant) -> dict:
         """Update or create an OpenAI assistant given an assistant model."""
-        name = f"{self.reference}-{assistant.name}-{assistant.role}"
-        openai_assistant = self.get_assistant_by_name(name)
+        name = self.generate_assistant_name(assistant)
+
+        params = {
+            "description": f"{assistant.role} for project {self.reference}.",
+            "instructions": f"Your name is {assistant.name}. "
+            + f"You are a {assistant.role}. {assistant.instructions}",
+            "model": os.getenv("ASSISTANT_MODEL", "gpt-4o"),
+            "name": name,
+            "temperature": float(os.getenv("ASSISTANT_TEMPERATURE", "0.2")),
+        }
+
+        openai_assistant = self.get_openai_assistant(assistant)
 
         if openai_assistant:
-            return self._client.beta.assistants.update(
-                openai_assistant.id,
-                description=f"{assistant.role} for project {self.reference}.",
-                instructions=f"Your name is {assistant.name}. "
-                + f"You are a {assistant.role}. {assistant.instructions}",
-                # tools=defn.tools,
-            )
+            return self._client.beta.assistants.update(openai_assistant.id, **params)
 
-        return self._client.beta.assistants.create(
-            model=os.getenv("ASSISTANT_MODEL", "gpt-4o"),
-            description=f"{assistant.role} for project {self.reference}.",
-            instructions=f"Your name is {assistant.name}. "
-            + f"You are a {assistant.role}. {assistant.instructions}",
-            name=f"{self.reference}-{assistant.name}-{assistant.role}",
-            temperature=float(os.getenv("ASSISTANT_TEMPERATURE", "0.2")),
-        )
+        return self._client.beta.assistants.create(**params)
