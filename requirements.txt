@@ -1,0 +1,10 @@
+Pillow
+devtools
+html_meta_data_parse
+magentic
+requests
+playwright
+pydantic
+python-dotenv
+slugify
+unstructured
