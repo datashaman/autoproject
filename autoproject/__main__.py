@@ -13,7 +13,7 @@ from autoproject.models import Project
 This is the list of goals for the project: {goals}
 Break the goals down into tasks to create a project plan.
 Create unique assistants with roles, skills and backstory necessary to complete the tasks.
-Create a number of assistants with efficiency in mind.
+Create a number of assistants with efficiency in mind, do not create more assistants than tasks.
 The backstory must be written as if speaking to that assistant (it will be a prompt for an LLM).
 Assign tasks to assistants with efficiency in mind.
 These are the functions that can be used by tasks: {function_list}
@@ -28,14 +28,15 @@ with the project and Internet.
 def create_project(goals: list[str], function_list: dict) -> Project: ...
 
 
-parser = argparse.ArgumentParser(description="Create a project plan.")
-parser.add_argument("-l", "--load", help="Load a project from a file.")
-parser.add_argument("-s", "--save", help="Save the project to a file before execution.")
-parser.add_argument("goals", nargs="*", help="The goals for the project.")
-
-
 def main():
     """The main function that executes the project plan."""
+    parser = argparse.ArgumentParser(description="Create a project plan.")
+    parser.add_argument("-l", "--load", help="Load a project from a file.")
+    parser.add_argument(
+        "-s", "--save", help="Save the project to a file before execution."
+    )
+    parser.add_argument("goals", nargs="*", help="The goals for the project.")
+
     args = parser.parse_args()
 
     if args.load:

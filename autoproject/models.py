@@ -1,11 +1,15 @@
 import json
 import os
+import time
 
 from typing import Optional
 
-from devtools import pprint
 from openai import OpenAI
+from magentic.chat_model.function_schema import FunctionCallFunctionSchema
+from magentic.chat_model.openai_chat_model import FunctionToolSchema
 from pydantic import BaseModel, PrivateAttr
+
+from autoproject import functions as available_functions
 
 
 class Assistant(BaseModel):
@@ -65,12 +69,6 @@ class Project(BaseModel):
 
         thread = client.beta.threads.create()
 
-        client.beta.threads.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=f"I would like to complete project {self.reference} with goals {self.goals}.",
-        )
-
         done_count = 0
         tasks = dict((task.title, task) for task in self.tasks)
 
@@ -81,31 +79,73 @@ class Project(BaseModel):
                 if all(tasks[depend_on].done for depend_on in task.depends_on):
                     print(f"{task.assigned_to.role}: {task.instructions}")
 
+                    client.beta.threads.messages.create(
+                        thread_id=thread.id,
+                        role="user",
+                        content=task.instructions,
+                    )
+
                     openai_assistant = self.get_openai_assistant(task.assigned_to)
 
                     run = client.beta.threads.runs.create_and_poll(
                         thread_id=thread.id,
                         assistant_id=openai_assistant.id,
-                        instructions=f"{task.assigned_to.name}, please {task.instructions}",
+                        tools=self.generate_tool_schemas(task.functions),
                     )
 
-                    messages = list(client.beta.threads.messages.list(
-                        thread_id=thread.id,
-                    ))
+                    while run.status == "requires_action":
+                        tool_outputs = []
+                        for (
+                            tool_call
+                        ) in run.required_action.submit_tool_outputs.tool_calls:
+                            tool_func = getattr(
+                                available_functions, tool_call.function.name
+                            )
+                            tool_arguments = json.loads(tool_call.function.arguments)
+
+                            print(
+                                f"Calling {tool_call.function.name} with {tool_arguments}"
+                            )
+                            output = tool_func(**tool_arguments)
+                            tool_outputs.append(
+                                {
+                                    "tool_call_id": tool_call.id,
+                                    "output": json.dumps(output),
+                                }
+                            )
+
+                        run = client.beta.threads.runs.submit_tool_outputs_and_poll(
+                            thread_id=thread.id,
+                            run_id=run.id,
+                            tool_outputs=tool_outputs,
+                        )
+
+                    messages = list(
+                        client.beta.threads.messages.list(
+                            thread_id=thread.id,
+                        )
+                    )
 
                     most_recent_message = messages[0]
 
                     if most_recent_message.role == "assistant":
-                        print(f"{task.assigned_to.name}: {most_recent_message.content[0].text.value}")
+                        print(
+                            f"{task.assigned_to.name}: {most_recent_message.content[0].text.value}"
+                        )
 
                     user_input = input("> ")
 
                     task.done = True
                     done_count += 1
 
+    def generate_tool_schemas(self, functions: list[str]) -> list[dict]:
+        functions = [getattr(available_functions, f) for f in functions]
+        function_schemas = [FunctionCallFunctionSchema(f) for f in functions]
+        return [FunctionToolSchema(schema).to_dict() for schema in function_schemas]
+
     def wait_on_run(self, run):
-        while run.status == "queued" or run.status == "in_progress":
-            run = client.beta.threads.runs.retrieve(
+        while run.status in ["queued", "in_progress"]:
+            run = self._client.beta.threads.runs.retrieve(
                 thread_id=run.thread_id,
                 run_id=run.id,
             )
@@ -151,7 +191,9 @@ class Project(BaseModel):
         params = {
             "description": f"{assistant.role} for project {self.reference}.",
             "instructions": f"Your name is {assistant.name}. "
-            + f"You are a {assistant.role}. {assistant.instructions}",
+            + f"You are a {assistant.role}. {assistant.instructions} "
+            + f"Your goals are {self.goals}. "
+            + "You will receive tasks to complete.",
             "model": os.getenv("ASSISTANT_MODEL", "gpt-4o"),
             "name": name,
             "temperature": float(os.getenv("ASSISTANT_TEMPERATURE", "0.2")),
